@@ -1,0 +1,80 @@
+import pandas as pd
+from datetime import datetime
+
+def compute_blg_stock_from_df(supplyon, pullout):
+    today = pd.to_datetime(datetime.today().date())
+
+    # Clean and convert data
+    supplyon['delivery_date'] = pd.to_datetime(supplyon['delivery_date'], errors='coerce')
+    supplyon = supplyon.dropna(subset=['delivery_date'])
+    supplyon['delivery_quantity'] = pd.to_numeric(supplyon['delivery_quantity'], errors='coerce').fillna(0)
+
+    pullout['con_date'] = pd.to_datetime(pullout['con_date'], errors='coerce')
+    pullout['FKIMG'] = pd.to_numeric(pullout['FKIMG'], errors='coerce').fillna(0)
+    pullout['RECEP_FLG'] = pullout['RECEP_FLG'].fillna("")
+
+    # Total delivered to BLG
+    blg_df = (
+        pullout[(pullout['RECEP_FLG'] == 'X') & (pullout['con_date'] > today)]
+        .groupby('buyer_article_no', as_index=False)['FKIMG']
+        .sum()
+        .rename(columns={'FKIMG': 'total_blg'})
+    )
+
+    supplyon_sorted = supplyon.sort_values(['buyer_article_no', 'delivery_date'])
+    result_rows = []
+
+    for article, group in supplyon_sorted.groupby('buyer_article_no', sort=False):
+        group = group.reset_index(drop=True)
+        total_blg = blg_df.loc[blg_df['buyer_article_no'] == article, 'total_blg']
+        stock = total_blg.iloc[0] if not total_blg.empty else 0
+
+        # Valid GIT
+        valid_git = pullout[
+            (pullout['buyer_article_no'] == article) &
+            (pullout['RECEP_FLG'] != 'X') &
+            (pullout['con_date'] > today)
+        ].sort_values('con_date').reset_index(drop=True)
+
+        git_ptr = 0
+        git_qty = 0
+        next_git_qty = 0
+        next_git_date = None
+
+        # Precompute cumulative git mapping
+        git_groups = []
+        git_index = 0
+        while git_index < len(valid_git):
+            batch_qty = valid_git.iloc[git_index]['FKIMG']
+            group_qty = batch_qty
+            next_batch_qty = 0
+            next_batch_date = None
+            # Find if next batch exists
+            if git_index + 1 < len(valid_git):
+                next_batch_qty = valid_git.iloc[git_index + 1]['FKIMG']
+                next_batch_date = valid_git.iloc[git_index + 1]['con_date'].date()
+            git_groups.append((group_qty, next_batch_qty, next_batch_date))
+            git_index += 1
+
+        # Apply the git group logic to supplyon rows
+        group_len = len(group)
+        for i in range(group_len):
+            if git_ptr < len(git_groups):
+                git_qty, next_git_qty, next_git_date = git_groups[git_ptr]
+                git_ptr += 1
+            else:
+                git_qty = next_git_qty = None
+                next_git_date = None
+
+            result_rows.append({
+                'id': group.loc[i, 'id'],
+                'buyer_article_no': article,
+                'delivery_date': group.loc[i, 'delivery_date'],
+                'delivery_qty': group.loc[i, 'delivery_quantity'],
+                'git_qty': git_qty,
+                'next_git_wh_qty': next_git_qty,
+                'next_git_wh_date': next_git_date,
+                'blg_warehouse_stock': None  # Optional: can add if needed
+            })
+
+    return pd.DataFrame(result_rows)
