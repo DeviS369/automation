@@ -1,0 +1,82 @@
+def compute_blg_stock_final(delivery_df, pullout_df):
+    """
+    Compute final BLG stock table per buyer_article_no, delivery_date,
+    including total_blg, git_qty, next_git_qty, and con_date.
+    """
+
+    result_rows = []
+
+    grouped_delivery = delivery_df.groupby('buyer_article_no')
+
+    for buyer_article_no, delivery_group in grouped_delivery:
+        delivery_group = delivery_group.sort_values('delivery_date')
+        pullout_group = pullout_df[pullout_df['buyer_article_no'] == buyer_article_no]
+
+        # Separate future pullout entries
+        future_pullout = pullout_group[pullout_group['con_date'] >= delivery_group['delivery_date'].min()].copy()
+        future_pullout = future_pullout.dropna(subset=['con_date'])
+
+        if future_pullout.empty:
+            # If no pullout data, default all values to 0 or empty
+            for _, row in delivery_group.iterrows():
+                result_rows.append({
+                    'buyer_article_no': buyer_article_no,
+                    'delivery_date': row['delivery_date'],
+                    'total_blg': row['total_blg'],
+                    'git_qty': 0,
+                    'next_git_qty': 0,
+                    'con_date': None
+                })
+            continue
+
+        # Sort and filter con_date to get latest FKIMG per date
+        future_pullout = (
+            future_pullout
+            .sort_values(['con_date', 'FKIMG'], ascending=[True, False])
+            .drop_duplicates(subset=['con_date'])
+            .sort_values('con_date')
+        )
+
+        con_date_list = future_pullout['con_date'].tolist()
+        fkimg_list = future_pullout['FKIMG'].tolist()
+
+        # Build GIT mapping
+        con_date_git_map = {}
+        cumulative_fkimg = 0
+
+        for i in range(len(con_date_list)):
+            current_con = con_date_list[i]
+            current_fkimg = fkimg_list[i]
+            cumulative_fkimg += current_fkimg
+            con_date_git_map[current_con] = {
+                'git_qty': cumulative_fkimg,
+                'next_git_qty': current_fkimg
+            }
+
+        # Assign total_blg only to the first row of each month
+        delivery_group['month'] = delivery_group['delivery_date'].dt.to_period('M')
+        first_rows = delivery_group.groupby('month').head(1).index
+
+        con_date_index = 0
+
+        for i, (_, row) in enumerate(delivery_group.iterrows()):
+            if con_date_index < len(con_date_list):
+                con_date = con_date_list[con_date_index]
+                git_data = con_date_git_map[con_date]
+            else:
+                con_date = None
+                git_data = {'git_qty': 0, 'next_git_qty': 0}
+
+            result_rows.append({
+                'buyer_article_no': buyer_article_no,
+                'delivery_date': row['delivery_date'],
+                'total_blg': row['total_blg'] if i in first_rows else 0,
+                'git_qty': git_data['git_qty'],
+                'next_git_qty': git_data['next_git_qty'],
+                'con_date': con_date
+            })
+
+            # Increment con_date only after each delivery row
+            con_date_index += 1
+
+    return pd.DataFrame(result_rows)
