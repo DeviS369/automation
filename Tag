@@ -1,0 +1,66 @@
+def compute_blg_stock_final(delivery_data):
+    from collections import defaultdict
+    import datetime
+
+    # Step 1: Sort by buyer_article_no and delivery_date
+    delivery_data.sort(key=lambda x: (x['buyer_article_no'], x['delivery_date']))
+
+    # Step 2: Group by buyer_article_no
+    grouped_data = defaultdict(list)
+    for row in delivery_data:
+        grouped_data[row['buyer_article_no']].append(row)
+
+    final_result = []
+
+    for article_no, rows in grouped_data.items():
+        # Step 3: Group deliveries by month-year (to simulate batches)
+        monthly_batches = defaultdict(list)
+        for row in rows:
+            month_year = row['delivery_date'].strftime('%Y-%m')
+            monthly_batches[month_year].append(row)
+
+        month_keys = sorted(monthly_batches.keys())
+        git_batches = []
+
+        # Step 4: Create git batches
+        for i in range(len(month_keys)):
+            batch_rows = monthly_batches[month_keys[i]]
+            git_qty = sum(r['delivery_qty'] for r in batch_rows)
+            git_batches.append({
+                'rows': batch_rows,
+                'git_qty': git_qty,
+                'con_date': batch_rows[0]['delivery_date'],
+                'batch_tag': f'Nxt Git #{i + 1}'
+            })
+
+        # Step 5: Assign git_qty, next_git_qty, and next_git_date
+        for i in range(len(git_batches)):
+            curr_batch = git_batches[i]
+            next_batch = git_batches[i + 1] if i + 1 < len(git_batches) else None
+
+            for row in curr_batch['rows']:
+                row['git_qty'] = curr_batch['git_qty']
+                if next_batch:
+                    row['next_git_wh_qty'] = next_batch['git_qty']
+                    row['next_git_wh_date'] = next_batch['con_date']
+                    row['next_git_wh_batch'] = next_batch['batch_tag']
+                else:
+                    row['next_git_wh_qty'] = 0
+                    row['next_git_wh_date'] = None
+                    row['next_git_wh_batch'] = None
+
+        # Step 6: Update blg_warehouse_stock for first row in each new batch
+        for i in range(1, len(git_batches)):
+            prev_batch = git_batches[i - 1]
+            curr_batch = git_batches[i]
+            last_row_prev = prev_batch['rows'][-1]
+            first_row_curr = curr_batch['rows'][0]
+
+            adjusted_stock = last_row_prev['blg_warehouse_stock'] + last_row_prev['next_git_wh_qty']
+            first_row_curr['blg_warehouse_stock'] = adjusted_stock
+
+        # Append all rows
+        for batch in git_batches:
+            final_result.extend(batch['rows'])
+
+    return final_result
