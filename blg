@@ -1,0 +1,51 @@
+def blg_ware():
+    today = pd.to_datetime(datetime.today().date())
+    start_of_month = today.replace(day=1)
+    data = {"IT_PULLOUT": []}
+    supplyon, pullout = call_data(supplyon_bmw, data)
+    supplyon['delivery_date'] = pd.to_datetime(
+        supplyon['delivery_date'].replace('Backorder', pd.NaT), errors='coerce')
+    supplyon = supplyon.dropna(subset=['delivery_date'])
+    supplyon['delivery_quantity'] = pd.to_numeric(supplyon['delivery_quantity'], errors='coerce').fillna(0)
+    supplyon['next_git_wh_qty'] = pd.to_numeric(supplyon['next_git_wh_qty'], errors='coerce').fillna(0)
+    pullout['con_date'] = pd.to_datetime(pullout['con_date'], errors='coerce')
+    pullout['FKIMG'] = pd.to_numeric(pullout['FKIMG'], errors='coerce').fillna(0)
+    pullout.loc[
+        (pullout['con_date'].notna()) & (pullout['con_date'] < today) & (pullout['RECEP_FLG'] != 'X'),
+        'RECEP_FLG'] = 'X'
+    blg_df = pullout[pullout['RECEP_FLG'] == 'X'].groupby('buyer_article_no', as_index=False)['FKIMG'].sum()
+    blg_df = blg_df.rename(columns={'FKIMG': 'total_blg'})
+    supplyon = pd.merge(supplyon, blg_df, how='left', on='buyer_article_no').fillna({'total_blg': 0})
+    supplyon = supplyon[supplyon['delivery_date'] >= today]
+    supplyon = supplyon.sort_values(['buyer_article_no', 'delivery_date'])
+    update_records = []
+    for article, group in supplyon.groupby('buyer_article_no'):
+        group = group.copy().sort_values('delivery_date')
+        group['blg_warehouse_stock'] = 0
+        total_blg = group['total_blg'].iloc[0]
+        warehouse_stock = 0
+        carry_forward_git = 0
+        months = sorted(group['delivery_date'].dt.to_period('M').unique())
+        group['blg_warehouse_stock'] = 0
+        for idx in group.index:
+            delivery_date = group.at[idx, 'delivery_date']
+            if delivery_date >= start_of_month:
+                supplyon.loc[idx, 'blg_warehouse_stock'] = total_blg
+            else:
+                warehouse_stock -= group.at[idx, 'delivery_quantity']
+                warehouse_stock += group.at[idx, 'next_git_wh_qty']
+                supplyon.loc[idx, 'blg_warehouse_stock'] = warehouse_stock
+        for i, row in group.iterrows():
+            try:
+                rec = supplyon_bmw.objects.get(pk=row['id'])
+                rec.blg_warehouse_stock = int(row['blg_warehouse_stock'])
+                latest = bmw_warehouse.objects.filter(buyer_article_no=article).order_by('-entry_date').first()
+                rec.warehouse_stock = int(latest.warehouse_qty) if latest else 0
+                update_records.append(rec)
+            except supplyon_bmw.DoesNotExist:
+                continue
+        if update_records:
+            with transaction.atomic():
+                supplyon_bmw.objects.bulk_update(update_records, ["blg_warehouse_stock", "warehouse_stock"])
+        print(f"✅ Updated {len(update_records)} future delivery records.")
+blg_ware()
